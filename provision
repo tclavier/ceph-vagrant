@@ -1,0 +1,98 @@
+#!/bin/bash
+set -e 
+set -x 
+
+wget -q -O- 'https://ceph.com/git/?p=ceph.git;a=blob_plain;f=keys/release.asc' | sudo apt-key add -
+echo deb http://ceph.com/debian-giant/ wheezy main | sudo tee /etc/apt/sources.list.d/ceph.list
+
+export ENV DEBIAN_FRONTEND=noninteractive
+apt-get update 
+apt-get upgrade -y
+apt-get dist-upgrade -y 
+apt-get install -y ntp ceph
+
+# cf http://ceph.com/docs/master/install/manual-deployment/
+# fsid generated with uuidgen
+# 
+FSID=5c9c6916-ddfe-4c18-bab5-45e832839de6
+NODE_NAME=$(hostname)
+NODE_IP=$(hostname -I | cut -f 2 -d ' ')
+
+/etc/init.d/ceph stop
+
+cat > /etc/ceph/ceph.conf <<EOF
+[global]
+fsid = $FSID
+mon initial members = $NODE_NAME
+mon host = 192.168.33.11, 192.168.33.12, 192.168.33.13
+public network = 192.168.33.0/24
+auth cluster required = cephx
+auth service required = cephx
+auth client required = cephx
+osd journal size = 1024
+filestore xattr use omap = true
+osd pool default size = 2
+osd pool default min size = 1
+osd pool default pg num = 333
+osd pool default pgp num = 333
+osd crush chooseleaf type = 1
+
+[mon.node1]
+host = node1
+mon addr = 192.168.33.11:6789
+mon data = /var/lib/ceph/mon/ceph-node1
+
+[mon.node2]
+host = node2
+mon addr = 192.168.33.12:6789
+mon data = /var/lib/ceph/mon/ceph-node2
+
+[mon.node3]
+host = node3
+mon addr = 192.168.33.13:6789
+mon data = /var/lib/ceph/mon/ceph-node3
+EOF
+
+cat > /etc/ceph/ceph.client.admin.keyring <<EOF
+[client.admin]
+  key = AQCPp5lUKGHjEBAAS7lM+3UNdxSlT6+hTXzMoQ==
+  auid = 0
+  caps mds = "allow"
+  caps mon = "allow *"
+  caps osd = "allow *"
+EOF
+
+cat > /tmp/ceph.mon.keyring <<EOF
+[mon.]
+  key = AQB0p5lUYAwBBhAA0OXudTLi5GL4WEGAIIor/w==
+  caps mon = "allow *"
+[client.admin]
+  key = AQCPp5lUKGHjEBAAS7lM+3UNdxSlT6+hTXzMoQ==
+  auid = 0
+  caps mds = "allow"
+  caps mon = "allow *"
+  caps osd = "allow *"
+EOF
+
+rm -f /tmp/monmap
+rm -rf /var/lib/ceph/mon/ceph-$NODE_NAME 
+mkdir /var/lib/ceph/mon/ceph-$NODE_NAME
+monmaptool --create --add $NODE_NAME $NODE_IP --fsid $FSID /tmp/monmap
+
+ceph-mon --mkfs -i $NODE_NAME --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
+touch /var/lib/ceph/mon/ceph-$NODE_NAME/done
+/etc/init.d/ceph start mon.$NODE_NAME
+
+# OSD
+rm -rf /var/lib/ceph/osd/ceph*
+OSD=$(ceph osd create)
+mkdir /var/lib/ceph/osd/ceph-$OSD
+ceph-osd -i $OSD --mkfs --mkkey
+ceph auth add osd.$OSD osd 'allow *' mon 'allow profile osd' -i /var/lib/ceph/osd/ceph-$OSD/keyring
+
+ceph osd crush add-bucket $NODE_NAME host
+sleep 5
+ceph osd crush move $NODE_NAME root=default
+ceph osd crush add osd.$OSD 1.0 host=$NODE_NAME
+
+/etc/init.d/ceph start osd.$OSD
