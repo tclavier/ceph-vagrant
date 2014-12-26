@@ -18,13 +18,21 @@ FSID=5c9c6916-ddfe-4c18-bab5-45e832839de6
 NODE_NAME=$(hostname)
 NODE_IP=$(hostname -I | cut -f 2 -d ' ')
 
+MEMBERS="node1, $NODE_NAME"
+HOSTS="192.168.33.11, $NODE_IP"
+if [ $NODE_NAME == "node1" ] 
+then
+  MEMBERS="node1"
+  HOSTS="192.168.33.11"
+fi  
+
 /etc/init.d/ceph stop
 
 cat > /etc/ceph/ceph.conf <<EOF
 [global]
 fsid = $FSID
-mon initial members = $NODE_NAME
-mon host = 192.168.33.11, 192.168.33.12, 192.168.33.13
+mon initial members = $MEMBERS
+mon host = $HOSTS
 public network = 192.168.33.0/24
 auth cluster required = cephx
 auth service required = cephx
@@ -51,6 +59,15 @@ mon data = /var/lib/ceph/mon/ceph-node2
 host = node3
 mon addr = 192.168.33.13:6789
 mon data = /var/lib/ceph/mon/ceph-node3
+
+[osd.0]
+osd host = node1
+
+[osd.1]
+osd host = node2
+
+[osd.2]
+osd host = node3
 EOF
 
 cat > /etc/ceph/ceph.client.admin.keyring <<EOF
@@ -91,7 +108,7 @@ ceph-osd -i $OSD --mkfs --mkkey
 ceph auth add osd.$OSD osd 'allow *' mon 'allow profile osd' -i /var/lib/ceph/osd/ceph-$OSD/keyring
 
 ceph osd crush add-bucket $NODE_NAME host
-sleep 5
+sleep 25
 ceph osd crush move $NODE_NAME root=default
 ceph osd crush add osd.$OSD 1.0 host=$NODE_NAME
 
