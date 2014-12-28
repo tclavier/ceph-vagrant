@@ -18,21 +18,14 @@ FSID=5c9c6916-ddfe-4c18-bab5-45e832839de6
 NODE_NAME=$(hostname)
 NODE_IP=$(hostname -I | cut -f 2 -d ' ')
 
-MEMBERS="node1, $NODE_NAME"
-HOSTS="192.168.33.11, $NODE_IP"
-if [ $NODE_NAME == "node1" ] 
-then
-  MEMBERS="node1"
-  HOSTS="192.168.33.11"
-fi  
-
 /etc/init.d/ceph stop
+
 
 cat > /etc/ceph/ceph.conf <<EOF
 [global]
 fsid = $FSID
-mon initial members = $MEMBERS
-mon host = $HOSTS
+mon initial members = node1
+mon host = 192.168.33.11
 public network = 192.168.33.0/24
 auth cluster required = cephx
 auth service required = cephx
@@ -60,14 +53,6 @@ host = node3
 mon addr = 192.168.33.13:6789
 mon data = /var/lib/ceph/mon/ceph-node3
 
-[osd.0]
-osd host = node1
-
-[osd.1]
-osd host = node2
-
-[osd.2]
-osd host = node3
 EOF
 
 cat > /etc/ceph/ceph.client.admin.keyring <<EOF
@@ -79,7 +64,9 @@ cat > /etc/ceph/ceph.client.admin.keyring <<EOF
   caps osd = "allow *"
 EOF
 
-cat > /tmp/ceph.mon.keyring <<EOF
+if [ $NODE_NAME == "node1" ] 
+then
+  cat > /tmp/ceph.mon.keyring <<EOF
 [mon.]
   key = AQB0p5lUYAwBBhAA0OXudTLi5GL4WEGAIIor/w==
   caps mon = "allow *"
@@ -90,14 +77,25 @@ cat > /tmp/ceph.mon.keyring <<EOF
   caps mon = "allow *"
   caps osd = "allow *"
 EOF
+fi
 
-rm -f /tmp/monmap
+# monitor
 rm -rf /var/lib/ceph/mon/ceph-$NODE_NAME 
 mkdir /var/lib/ceph/mon/ceph-$NODE_NAME
-monmaptool --create --add $NODE_NAME $NODE_IP --fsid $FSID /tmp/monmap
 
-ceph-mon --mkfs -i $NODE_NAME --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
-touch /var/lib/ceph/mon/ceph-$NODE_NAME/done
+if [ $NODE_NAME == "node1" ] 
+then
+  rm -f /tmp/monmap
+  monmaptool --create --add $NODE_NAME $NODE_IP --fsid $FSID /tmp/monmap
+  ceph-mon --mkfs -i $NODE_NAME --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
+else
+  mkdir /tmp/ceph
+  ceph auth get mon. -o /tmp/ceph/mon.key
+  ceph mon getmap -o /tmp/ceph/mon.map
+  ceph-mon -i $NODE_NAME --mkfs --monmap /tmp/ceph/mon.map --keyring /tmp/ceph/mon.key
+  #ceph mon add $NODE_NAME $NODE_IP
+fi
+touch /var/lib/ceph/mon/ceph-$NODE_NAME/sysvinit
 /etc/init.d/ceph start mon.$NODE_NAME
 
 # OSD
@@ -105,11 +103,26 @@ rm -rf /var/lib/ceph/osd/ceph*
 OSD=$(ceph osd create)
 mkdir /var/lib/ceph/osd/ceph-$OSD
 ceph-osd -i $OSD --mkfs --mkkey
-ceph auth add osd.$OSD osd 'allow *' mon 'allow profile osd' -i /var/lib/ceph/osd/ceph-$OSD/keyring
 
-ceph osd crush add-bucket $NODE_NAME host
-sleep 25
-ceph osd crush move $NODE_NAME root=default
+if [ $NODE_NAME == "node1" ] 
+then
+  ceph auth add osd.$OSD osd 'allow *' mon 'allow profile osd' -i /var/lib/ceph/osd/ceph-$OSD/keyring
+  ceph osd crush add-bucket $NODE_NAME host
+  ceph osd crush move $NODE_NAME root=default
+  #ceph osd crush add osd.$OSD 1.0 host=$NODE_NAME
+else
+  ceph auth add osd.$OSD osd 'allow *' mon 'allow rwx' -i /var/lib/ceph/osd/ceph-$OSD/keyring
+  ceph osd crush add-bucket $NODE_NAME host
+fi
 ceph osd crush add osd.$OSD 1.0 host=$NODE_NAME
-
+touch /var/lib/ceph/osd/ceph-$OSD/sysvinit
 /etc/init.d/ceph start osd.$OSD
+
+# FS
+if [ $NODE_NAME == "node1" ] 
+then
+  ceph osd pool create cephfs_data 1
+  ceph osd pool create cephfs_metadata 1
+  ceph fs new cephfs cephfs_metadata cephfs_data
+fi
+
